@@ -1,12 +1,38 @@
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Uppy from "@uppy/core";
 import XHRUpload from "@uppy/xhr-upload";
-import Dashboard from "@uppy/react/dashboard";
+import { Dashboard } from "@uppy/react";
+import "@uppy/core/css/style.min.css";
+import "@uppy/dashboard/css/style.min.css";
 import "./App.css";
+
+type CloudFile = {
+  key: string;
+  size: number;
+  uploaded?: string;
+  httpMetadata?: {
+    contentType?: string;
+  };
+};
+
+const folders = [
+  "shared",
+  "websites/blog",
+  "websites/flytripvisa",
+  "websites/other",
+];
+
+const API = "/api";
 
 function App() {
   const [folder, setFolder] = useState("shared");
+  const [files, setFiles] = useState<CloudFile[]>([]);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [tab, setTab] = useState("dashboard");
+  const [preview, setPreview] = useState<string | null>(null);
 
   const [uppy] = useState(() =>
     new Uppy({
@@ -18,7 +44,7 @@ function App() {
       },
       meta: { folder: "shared" },
     }).use(XHRUpload, {
-      endpoint: "/api/upload",
+      endpoint: `${API}/upload`,
       method: "POST",
       formData: true,
       fieldName: "file",
@@ -26,122 +52,406 @@ function App() {
     }),
   );
 
-  const folders = [
-    "shared",
-    "websites/blog",
-    "websites/flytripvisa",
-    "websites/other",
-  ];
+  const loadFiles = useCallback(async () => {
+    setLoading(true);
+    setError("");
 
-  function changeFolder(value: string) {
-    setFolder(value);
-    uppy.setMeta({ folder: value });
+    try {
+      const response = await fetch(
+        `${API}/files?prefix=${encodeURIComponent(folder + "/")}`,
+      );
+
+      if (!response.ok) {
+        throw new Error(`File list failed: ${response.status}`);
+      }
+
+      const data = await response.json() as {
+        files?: CloudFile[];
+        objects?: CloudFile[];
+      };
+
+      setFiles(data.files ?? data.objects ?? []);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not load files",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [folder]);
+
+  useEffect(() => {
+    uppy.setMeta({ folder });
+
+    const onComplete = () => {
+      void loadFiles();
+    };
+
+    uppy.on("complete", onComplete);
+
+    return () => {
+      uppy.off("complete", onComplete);
+    };
+  }, [uppy, folder, loadFiles]);
+
+  useEffect(() => {
+    void loadFiles();
+  }, [loadFiles]);
+
+  useEffect(() => {
+    return () => {
+      uppy.destroy();
+    };
+  }, [uppy]);
+
+  async function deleteFile(key: string) {
+    if (!window.confirm("Delete this file permanently?")) return;
+
+    try {
+      const response = await fetch(
+        `${API}/file?key=${encodeURIComponent(key)}`,
+        { method: "DELETE" },
+      );
+
+      if (!response.ok) {
+        throw new Error("Delete failed");
+      }
+
+      await loadFiles();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Delete failed",
+      );
+    }
   }
 
+  function formatSize(bytes: number) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024)
+      return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024)
+      return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  }
+
+  const filteredFiles = files.filter((file) =>
+    file.key.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  const totalSize = files.reduce(
+    (total, file) => total + file.size,
+    0,
+  );
+
   return (
-    <main className="app">
+    <div className="mediacloud">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-icon">M</div>
+          <span className="brand-icon">☁</span>
           <span>MediaCloud</span>
         </div>
 
         <p className="nav-label">WORKSPACE</p>
-        <nav>
-          <a className="active" href="#dashboard">▦ Dashboard</a>
-          <a href="#upload">↑ Upload files</a>
-          <a href="#library">▤ My files</a>
-          <a href="#folders">▣ Folders</a>
-        </nav>
 
-        <div className="sidebar-bottom">
-          <span>Cloud Storage</span>
-          <strong>Cloudflare R2</strong>
-          <small>Storage integration pending</small>
+        <button
+          className={tab === "dashboard" ? "nav-item active" : "nav-item"}
+          onClick={() => setTab("dashboard")}
+        >
+          ◫ Dashboard
+        </button>
+
+        <button
+          className={tab === "upload" ? "nav-item active" : "nav-item"}
+          onClick={() => setTab("upload")}
+        >
+          ↑ Upload Files
+        </button>
+
+        <button
+          className={tab === "files" ? "nav-item active" : "nav-item"}
+          onClick={() => setTab("files")}
+        >
+          ▤ My Files
+        </button>
+
+        <p className="nav-label">STORAGE FOLDERS</p>
+
+        {folders.map((item) => (
+          <button
+            key={item}
+            className={folder === item ? "folder-item active" : "folder-item"}
+            onClick={() => {
+              setFolder(item);
+              setTab("files");
+            }}
+          >
+            📁 {item.split("/").pop()}
+          </button>
+        ))}
+
+        <div className="sidebar-footer">
+          <span className="status-dot" />
+          Cloud Storage
+          <small>R2 Connected through Worker</small>
         </div>
       </aside>
 
-      <section className="main-content" id="dashboard">
+      <main className="main-content">
         <header className="topbar">
           <div>
-            <span className="eyebrow">PERSONAL WORKSPACE</span>
-            <h1>Cloud Drive</h1>
+            <h2>
+              {tab === "dashboard"
+                ? "Dashboard"
+                : tab === "upload"
+                  ? "Upload Files"
+                  : "My Files"}
+            </h2>
+            <p>Manage your cloud storage</p>
           </div>
-          <div className="avatar">A</div>
+
+          <button
+            className="primary-button"
+            onClick={() => setTab("upload")}
+          >
+            + Upload Files
+          </button>
         </header>
 
-        <section className="welcome">
-          <div>
-            <span className="eyebrow">YOUR FILES, YOUR SPACE</span>
-            <h2>Everything in one place.</h2>
-            <p>Upload and organize your digital assets securely.</p>
+        {error && (
+          <div className="error-message">
+            {error}
+            <button onClick={() => setError("")}>×</button>
           </div>
-          <div className="welcome-icon">☁</div>
-        </section>
+        )}
 
-        <section className="stats">
-          <article className="stat-card">
-            <span>Total files</span>
-            <strong>--</strong>
-            <small>Waiting for R2 API</small>
-          </article>
-          <article className="stat-card">
-            <span>Storage used</span>
-            <strong>--</strong>
-            <small>Waiting for R2 API</small>
-          </article>
-          <article className="stat-card">
-            <span>Storage provider</span>
-            <strong>R2</strong>
-            <small>Cloudflare Object Storage</small>
-          </article>
-        </section>
+        {tab === "dashboard" && (
+          <>
+            <section className="welcome-card">
+              <div>
+                <span className="eyebrow">YOUR CLOUD WORKSPACE</span>
+                <h1>Everything in one place.</h1>
+                <p>
+                  Upload, organize and manage your files
+                  with MediaCloud.
+                </p>
+                <button
+                  className="primary-button"
+                  onClick={() => setTab("upload")}
+                >
+                  Start Uploading ↑
+                </button>
+              </div>
+              <div className="welcome-icon">☁</div>
+            </section>
 
-        <section className="upload-section" id="upload">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">FILE MANAGER</span>
-              <h2>Upload files</h2>
+            <section className="stats-grid">
+              <div className="stat-card">
+                <span>Total Files</span>
+                <strong>{files.length}</strong>
+                <small>Current folder</small>
+              </div>
+              <div className="stat-card">
+                <span>Storage Used</span>
+                <strong>{formatSize(totalSize)}</strong>
+                <small>Current folder</small>
+              </div>
+              <div className="stat-card">
+                <span>Active Folder</span>
+                <strong className="folder-stat">
+                  {folder.split("/").pop()}
+                </strong>
+                <small>Selected location</small>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="section-heading">
+                <div>
+                  <h3>Recent Files</h3>
+                  <p>Your latest stored files</p>
+                </div>
+                <button
+                  className="text-button"
+                  onClick={() => setTab("files")}
+                >
+                  View All →
+                </button>
+              </div>
+
+              <FileList
+                files={files.slice(0, 5)}
+                loading={loading}
+                onPreview={setPreview}
+                onDelete={deleteFile}
+                formatSize={formatSize}
+              />
+            </section>
+          </>
+        )}
+
+        {tab === "upload" && (
+          <section className="panel upload-panel">
+            <div className="section-heading">
+              <div>
+                <h3>Upload to Cloud</h3>
+                <p>Select files and choose a destination folder</p>
+              </div>
             </div>
+
+            <label className="field-label">Destination Folder</label>
             <select
+              className="folder-select"
               value={folder}
-              onChange={(e) => changeFolder(e.target.value)}
+              onChange={(event) => setFolder(event.target.value)}
             >
               {folders.map((item) => (
-                <option key={item} value={item}>{item}</option>
+                <option key={item} value={item}>
+                  {item}
+                </option>
               ))}
             </select>
-          </div>
 
-          <Dashboard
-            uppy={uppy}
-            height={390}
-            proudlyDisplayPoweredByUppy={false}
-            hideProgressDetails={false}
-            note="Images, videos and documents. Maximum 100 MB per file."
-          />
-        </section>
+            <Dashboard
+              uppy={uppy}
+              proudlyDisplayPoweredByUppy={false}
+              height={400}
+              note="Maximum 20 files, 100 MB per file"
+            />
+          </section>
+        )}
 
-        <section className="library-section" id="library">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">YOUR COLLECTION</span>
-              <h2>Recent files</h2>
+        {tab === "files" && (
+          <section className="panel">
+            <div className="section-heading">
+              <div>
+                <h3>My Files</h3>
+                <p>Browse files in your cloud storage</p>
+              </div>
+              <button
+                className="secondary-button"
+                onClick={() => void loadFiles()}
+              >
+                ↻ Refresh
+              </button>
             </div>
-          </div>
 
-          <div className="empty-state">
-            <div className="empty-icon">▤</div>
-            <h3>Your library is ready</h3>
-            <p>Files will appear here after the R2 API is connected.</p>
-          </div>
-        </section>
+            <div className="file-toolbar">
+              <select
+                className="folder-select"
+                value={folder}
+                onChange={(event) => setFolder(event.target.value)}
+              >
+                {folders.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
 
-        <footer>
-          MediaCloud · Powered by Cloudflare R2
-        </footer>
-      </section>
-    </main>
+              <input
+                className="search-input"
+                placeholder="Search files..."
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+
+            <FileList
+              files={filteredFiles}
+              loading={loading}
+              onPreview={setPreview}
+              onDelete={deleteFile}
+              formatSize={formatSize}
+            />
+          </section>
+        )}
+      </main>
+
+      {preview && (
+        <div
+          className="preview-overlay"
+          onClick={() => setPreview(null)}
+        >
+          <div
+            className="preview-box"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="preview-close"
+              onClick={() => setPreview(null)}
+            >
+              ×
+            </button>
+            <h3>File Preview</h3>
+            <p>{preview}</p>
+            <a
+              href={`${API}/file?key=${encodeURIComponent(preview)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open / Download File
+            </a>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FileList({
+  files,
+  loading,
+  onPreview,
+  onDelete,
+  formatSize,
+}: {
+  files: CloudFile[];
+  loading: boolean;
+  onPreview: (key: string) => void;
+  onDelete: (key: string) => void;
+  formatSize: (bytes: number) => string;
+}) {
+  if (loading) {
+    return <div className="empty-state">Loading files...</div>;
+  }
+
+  if (!files.length) {
+    return (
+      <div className="empty-state">
+        <span>☁</span>
+        <h3>No files found</h3>
+        <p>Upload files to see them here.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="file-list">
+      {files.map((file) => (
+        <div className="file-row" key={file.key}>
+          <div className="file-icon">📄</div>
+          <div className="file-info">
+            <strong>{file.key.split("/").pop()}</strong>
+            <small>{file.key}</small>
+          </div>
+          <span className="file-size">{formatSize(file.size)}</span>
+          <button
+            className="icon-button"
+            title="Preview"
+            onClick={() => onPreview(file.key)}
+          >
+            ↗
+          </button>
+          <button
+            className="icon-button delete-button"
+            title="Delete"
+            onClick={() => onDelete(file.key)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 
