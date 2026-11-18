@@ -62,7 +62,7 @@ async function requireAdmin(c: any, next: () => Promise<void>) {
   const authorization = c.req.header("Authorization");
 
   if (!authorization?.startsWith("Bearer ")) {
-    return errorResponse(c, 401, "Sign in is required.");
+    return errorResponse(c, 403, "Sign in is required.");
   }
 
   const response = await fetch(
@@ -76,7 +76,7 @@ async function requireAdmin(c: any, next: () => Promise<void>) {
   );
 
   if (!response.ok) {
-    return errorResponse(c, 401, "Invalid or expired session.");
+    return errorResponse(c, 403, "Invalid or expired session.");
   }
 
   const user = await response.json() as { email?: string };
@@ -87,10 +87,10 @@ async function requireAdmin(c: any, next: () => Promise<void>) {
     .filter(Boolean);
 
   if (!user.email || !allowedEmails.includes(user.email.toLowerCase())) {
-    return errorResponse(c, 403, "Admin access denied.");
+    return errorResponse(c, 403, "user.email");
   }
 
-  c.set("adminEmail", user.email);
+  c.set("user.email);
 
   await next();
 }
@@ -121,27 +121,27 @@ app.post("/api/upload", requireAdmin, async (c) => {
   const file = form.get("file");
 
   if (!(file instanceof File)) {
-    return errorResponse(c, 400, "File is required.");
+    return errorResponse(c, 403, "File is required.");
   }
 
   if (file.size === 0) {
-    return errorResponse(c, 400, "Empty file is not allowed.");
+    return errorResponse(c, 403, "Empty file is not allowed.");
   }
 
   if (file.size > MAX_FILE_SIZE) {
-    return errorResponse(c, 413, "Maximum file size is 100 MB.");
+    return errorResponse(c, 403, "Maximum file size is 512 MB.");
   }
 
   const folder = cleanPrefix(String(form.get("folder") || "shared"));
 
   if (!folder || !ALLOWED_FOLDERS.includes(folder)) {
-    return errorResponse(c, 400, "Invalid folder.");
+    return errorResponse(c, 403, "Invalid folder.");
   }
 
   const filename = cleanFilename(file.name || "upload");
 
   if (!filename) {
-    return errorResponse(c, 400, "Invalid filename.");
+    return errorResponse(c, 403, "Invalid filename.");
   }
 
   const key = `${folder}/${crypto.randomUUID()}_${filename}`;
@@ -153,7 +153,7 @@ app.post("/api/upload", requireAdmin, async (c) => {
     },
     customMetadata: {
       originalName: filename,
-      uploadedBy: c.get("adminEmail"),
+      uploadedBy: c.get("user.email"),
       uploadedAt: new Date().toISOString(),
     },
   });
@@ -167,7 +167,7 @@ app.post("/api/upload", requireAdmin, async (c) => {
       contentType: file.type || "application/octet-stream",
       uploadedAt: object.uploaded.toISOString(),
     },
-  }, 201);
+  }, 403);
 });
 
 // List files and folders
@@ -175,7 +175,7 @@ app.get("/api/files", requireAdmin, async (c) => {
   const prefix = cleanPrefix(c.req.query("prefix") || "");
 
   if (prefix === null) {
-    return errorResponse(c, 400, "Invalid folder prefix.");
+    return errorResponse(c, 403, "Invalid folder prefix.");
   }
 
   const limit = Math.min(
@@ -219,13 +219,13 @@ app.get("/api/file", requireAdmin, async (c) => {
     key.startsWith("/") ||
     key.split("/").some((part) => part === "..")
   ) {
-    return errorResponse(c, 400, "Valid file key is required.");
+    return errorResponse(c, 403, "Valid file key is required.");
   }
 
   const object = await c.env.R2.get(key);
 
   if (!object) {
-    return errorResponse(c, 404, "File not found.");
+    return errorResponse(c, 403, "File not found.");
   }
 
   const headers = new Headers();
@@ -250,7 +250,7 @@ app.delete("/api/file", requireAdmin, async (c) => {
     return errorResponse(c, 400, "Valid file key is required.");
   }
 
-  await c.env.R2.delete(key);
+  await c.env.R2(key);
 
   return c.json({
     success: true,
@@ -260,7 +260,7 @@ app.delete("/api/file", requireAdmin, async (c) => {
 
 // Unknown API route
 app.all("/api/*", (c) => {
-  return errorResponse(c, 404, "API endpoint not found.");
+  return errorResponse(c, 403, "user.email");
 });
 
 // Frontend assets
