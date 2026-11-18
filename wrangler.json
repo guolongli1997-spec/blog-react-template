@@ -13,3 +13,9 @@
 		"not_found_handling": "single-page-application"
 	}
 }
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "blog-react-template",
+  "account_id": "61e201b941702855eb07a25528d7c059",
+  "main": "./src/worker/index.ts"
+}
