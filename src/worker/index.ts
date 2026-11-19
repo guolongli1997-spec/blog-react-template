@@ -1,380 +1,180 @@
+import { Hono, type Context } from "hono";
 
-import { Hono } from "hono";
-import type { MiddlewareHandler } from "hono";
-
-interface WorkerBindings {
-  R2: R2Bucket;
-  ASSETS: Fetcher;
-  SUPABASE_URL: string;
-  SUPABASE_PUBLISHABLE_KEY: string;
-  ADMIN_EMAILS: string;
-}
-
-type AppEnv = {
-  Bindings: WorkerBindings;
-  Variables: {
-    userEmail: string;
-  };
-};
-
-const app = new Hono<AppEnv>();
+const app = new Hono<{ Bindings: Env }>();
 
 const MAX_FILE_SIZE = 100 * 1024 * 1024;
 
 const ALLOWED_FOLDERS = [
-  "shared",
   "websites/blog",
   "websites/flytripvisa",
   "websites/other",
+  "shared",
 ];
 
-function errorResponse(
-  c: Parameters<MiddlewareHandler<AppEnv>>[0],
-  status: number,
-  error: string
-) {
-  return c.json({ success: false, error }, status as 400);
-}
-
-function cleanFilename(value: string) {
-  return value
-    .normalize("NFKC")
-    .replace(/[\/\\]/g, "_")
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .trim()
-    .slice(0, 180);
-}
-
-function cleanPrefix(value: string): string | null {
-  const prefix = value.replace(/^\/+|\/+$/g, "").trim();
-
-  if (
-    prefix &&
-    prefix.split("/").some(
-      (part) => !part || part === "." || part === ".."
-    )
-  ) {
-    return null;
+app.use("*", async (c, next) => {
+  if (c.req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Max-Age": "86400",
+      },
+    });
   }
+  await next();
+  c.header("Access-Control-Allow-Origin", "*");
+});
 
-  return prefix;
+async function authenticate(c: Context<{ Bindings: Env }>, next: () => Promise<void>) {
+  const authorization = c.req.header("Authorization");
+  if (!authorization?.startsWith("Bearer ")) {
+    return c.json({ error: "Authentication required" }, 401);
+  }
+  const supabaseUrl = c.env.VITE_SUPABASE_URL;
+  const supabaseKey = c.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  if (!supabaseUrl || !supabaseKey) {
+    return c.json({ error: "Authentication service not configured" }, 503);
+  }
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: { apikey: supabaseKey, Authorization: authorization },
+    });
+    if (!response.ok) {
+      return c.json({ error: "Invalid or expired session" }, 401);
+    }
+    await next();
+  } catch {
+    return c.json({ error: "Authentication service unavailable" }, 503);
+  }
 }
 
-function isAllowedKey(key: string) {
-  if (!key || key.startsWith("/")) return false;
+function validFolder(folder: string): boolean {
+  return ALLOWED_FOLDERS.includes(folder);
+}
 
-  const parts = key.split("/");
-
-  if (parts.some(
-    (part) => !part || part === "." || part === ".."
-  )) {
-    return false;
-  }
-
+function validKey(key: string): boolean {
   return ALLOWED_FOLDERS.some(
-    (folder) => key.startsWith(`${folder}/`)
+    (folder) => key.startsWith(`${folder}/`) && key.length > folder.length + 1,
   );
 }
 
-// Supabase Admin Authentication
-const requireAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
-  const {
-    SUPABASE_URL,
-    SUPABASE_PUBLISHABLE_KEY,
-    ADMIN_EMAILS,
-  } = c.env;
-
-  if (
-    !SUPABASE_URL ||
-    !SUPABASE_PUBLISHABLE_KEY ||
-    !ADMIN_EMAILS
-  ) {
-    return c.json({
-      success: false,
-      error: "Worker authentication is not configured.",
-    }, 503);
+app.get("/api/health", async (c: Context<{ Bindings: Env }>) => {
+  const r2Configured = !!c.env.R2;
+  const authConfigured = !!(c.env.VITE_SUPABASE_URL && c.env.VITE_SUPABASE_PUBLISHABLE_KEY);
+  let r2Connected = false;
+  if (r2Configured) {
+    try {
+      await c.env.R2.list({ limit: 1 });
+      r2Connected = true;
+    } catch {
+      r2Connected = false;
+    }
   }
-
-  const authorization = c.req.header("Authorization");
-
-  if (!authorization?.startsWith("Bearer ")) {
-    return c.json({
-      success: false,
-      error: "Sign in is required.",
-    }, 401);
-  }
-
-  let response: Response;
-
-  try {
-    response = await fetch(
-      new URL("/auth/v1/user", SUPABASE_URL),
-      {
-        headers: {
-          apikey: SUPABASE_PUBLISHABLE_KEY,
-          Authorization: authorization,
-        },
-      }
-    );
-  } catch {
-    return c.json({
-      success: false,
-      error: "Authentication service unavailable.",
-    }, 503);
-  }
-
-  if (!response.ok) {
-    return c.json({
-      success: false,
-      error: "Invalid or expired session.",
-    }, 401);
-  }
-
-  const user = await response.json() as {
-    email?: string;
-  };
-
-  const allowedEmails = ADMIN_EMAILS
-    .split(",")
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean);
-
-  const email = user.email?.trim().toLowerCase();
-
-  if (!email || !allowedEmails.includes(email)) {
-    return c.json({
-      success: false,
-      error: "You are not authorized as an administrator.",
-    }, 403);
-  }
-
-  c.set("userEmail", email);
-
-  await next();
-};
-
-// API status
-app.get("/api/", (c) => {
-  return c.json({
-    name: "MediaCloud",
-    status: "online",
-    storage: "Cloudflare R2",
-    bucket: "jing24-shop",
-    version: "1.2.0",
-  });
-});
-
-// Health check
-app.get("/api/health", (c) => {
   return c.json({
     success: true,
-    message: "MediaCloud API is running",
+    status: r2Configured && r2Connected && authConfigured ? "healthy" : "degraded",
     storage: "Cloudflare R2",
+    bucket: "jing24-shop",
+    r2: { configured: r2Configured, connected: r2Connected },
+    auth: { configured: authConfigured, provider: "supabase" },
     timestamp: new Date().toISOString(),
   });
 });
 
-// Upload file
-app.post("/api/upload", requireAdmin, async (c) => {
-  const form = await c.req.formData();
-  const file = form.get("file");
+app.use("/api/upload", authenticate);
+app.use("/api/files", authenticate);
+app.use("/api/file", authenticate);
 
-  if (!(file instanceof File)) {
-    return errorResponse(c, 400, "File is required.");
-  }
-
-  if (file.size === 0) {
-    return errorResponse(c, 400, "Empty file is not allowed.");
-  }
-
-  if (file.size > MAX_FILE_SIZE) {
-    return errorResponse(c, 413, "Maximum file size is 100 MB.");
-  }
-
-  const folder = cleanPrefix(
-    String(form.get("folder") || "shared")
-  );
-
-  if (!folder || !ALLOWED_FOLDERS.includes(folder)) {
-    return errorResponse(c, 400, "Invalid folder.");
-  }
-
-  const filename = cleanFilename(file.name || "upload");
-
-  if (!filename) {
-    return errorResponse(c, 400, "Invalid filename.");
-  }
-
-  const key = `${folder}/${crypto.randomUUID()}_${filename}`;
-  const uploadedAt = new Date().toISOString();
-
-  const object = await c.env.R2.put(
-    key,
-    file.stream(),
-    {
-      httpMetadata: {
-        contentType:
-          file.type || "application/octet-stream",
-        contentDisposition:
-          `inline; filename*=UTF-8''${encodeURIComponent(filename)}`,
-      },
-      customMetadata: {
-        originalName: filename,
-        uploadedBy: c.get("userEmail"),
-        uploadedAt,
-      },
+app.post("/api/upload", async (c: Context<{ Bindings: Env }>) => {
+  try {
+    const form = await c.req.formData();
+    const file = form.get("file");
+    const folder = String(form.get("folder") || "shared");
+    if (!(file instanceof File)) {
+      return c.json({ error: "File is required" }, 400);
     }
-  );
-
-  if (!object) {
-    return errorResponse(c, 500, "File upload failed.");
-  }
-
-  return c.json({
-    success: true,
-    file: {
-      key,
-      name: filename,
-      size: file.size,
-      contentType:
-        file.type || "application/octet-stream",
-      uploadedAt: object.uploaded.toISOString(),
-    },
-  }, 200);
-});
-
-// List files and folders
-app.get("/api/files", requireAdmin, async (c) => {
-  const prefix = cleanPrefix(
-    c.req.query("prefix") || ""
-  );
-
-  if (prefix === null) {
-    return errorResponse(c, 400, "Invalid folder prefix.");
-  }
-
-  if (
-    prefix &&
-    !ALLOWED_FOLDERS.some(
-      (folder) =>
-        prefix === folder ||
-        prefix.startsWith(`${folder}/`)
-    )
-  ) {
-    return errorResponse(c, 400, "Folder is not allowed.");
-  }
-
-  const requestedLimit = Number(
-    c.req.query("limit") || 50
-  );
-
-  const limit = Math.min(
-    Math.max(
-      Number.isFinite(requestedLimit) ? requestedLimit : 50,
-      1
-    ),
-    100
-  );
-
-  const result = await c.env.R2.list({
-    prefix: prefix
-      ? `${prefix.replace(/\/+$/, "")}/`
-      : "",
-    cursor: c.req.query("cursor") || undefined,
-    limit,
-    delimiter: "/",
-  });
-
-  return c.json({
-    success: true,
-    files: result.objects.map((object) => ({
+    if (!validFolder(folder)) {
+      return c.json({ error: "Invalid destination folder" }, 400);
+    }
+    if (file.size === 0 || file.size > MAX_FILE_SIZE) {
+      return c.json({ error: "File must be between 1 byte and 100 MB" }, 413);
+    }
+    const originalName = file.name.replace(/[\\/]/g, "_").slice(0, 180);
+    const safeName = originalName.replace(/[^\w.\-() ]/g, "_");
+    const key = `${folder}/${crypto.randomUUID()}-${safeName}`;
+    const object = await c.env.R2.put(key, file.stream(), {
+      httpMetadata: { contentType: file.type || "application/octet-stream" },
+      customMetadata: { originalName },
+    });
+    return c.json({
+      success: true,
       key: object.key,
-      name:
-        object.customMetadata?.originalName ||
-        object.key.split("/").pop(),
+      name: originalName,
       size: object.size,
-      uploadedAt: object.uploaded.toISOString(),
-      etag: object.etag,
-      contentType:
-        object.httpMetadata?.contentType ||
-        "application/octet-stream",
-    })),
-    folders: result.delimitedPrefixes,
-    cursor: result.truncated ? result.cursor : null,
-    truncated: result.truncated,
-  });
+      type: file.type,
+    }, 201);
+  } catch {
+    return c.json({ error: "Upload failed" }, 500);
+  }
 });
 
-// Preview or download file
-app.get("/api/file", requireAdmin, async (c) => {
-  const key = c.req.query("key");
-
-  if (!key || !isAllowedKey(key)) {
-    return errorResponse(c, 400, "Valid file key is required.");
+app.get("/api/files", async (c: Context<{ Bindings: Env }>) => {
+  const folder = c.req.query("folder") || "shared";
+  const cursor = c.req.query("cursor");
+  if (!validFolder(folder)) {
+    return c.json({ error: "Invalid folder" }, 400);
   }
-
-  const object = await c.env.R2.get(key);
-
-  if (!object) {
-    return errorResponse(c, 404, "File not found.");
-  }
-
-  const headers = new Headers();
-
-  object.writeHttpMetadata(headers);
-  headers.set("etag", object.httpEtag);
-  headers.set("cache-control", "private, no-store");
-  headers.set("content-disposition", "inline");
-
-  return new Response(object.body, {
-    status: 200,
-    headers,
+  const result = await c.env.R2.list({
+    prefix: `${folder}/`,
+    cursor: cursor || undefined,
+    limit: 1000,
+    include: ["httpMetadata", "customMetadata"],
   });
-});
-
-// Delete file
-app.delete("/api/file", requireAdmin, async (c) => {
-  const key = c.req.query("key");
-
-  if (!key || !isAllowedKey(key)) {
-    return errorResponse(c, 400, "Valid file key is required.");
-  }
-
-  const existing = await c.env.R2.head(key);
-
-  if (!existing) {
-    return errorResponse(c, 404, "File not found.");
-  }
-
-  await c.env.R2.delete(key);
-
+  const files = result.objects.map((object: any) => ({
+    key: object.key,
+    name: object.customMetadata?.originalName || object.key.split("/").pop(),
+    size: object.size,
+    uploaded: object.uploaded,
+    contentType: object.httpMetadata?.contentType || "application/octet-stream",
+  }));
   return c.json({
     success: true,
-    deleted: key,
+    files,
+    truncated: result.truncated,
+    cursor: result.truncated ? result.cursor : null,
   });
 });
 
-// Unknown API route
-app.all("/api/*", (c) => {
-  return c.json({
-    success: false,
-    error: "API endpoint not found.",
-  }, 404);
+app.get("/api/file", async (c: Context<{ Bindings: Env }>) => {
+  const key = c.req.query("key");
+  if (!key || !validKey(key)) {
+    return c.json({ error: "Invalid file key" }, 400);
+  }
+  const object = await c.env.R2.get(key);
+  if (!object) {
+    return c.json({ error: "File not found" }, 404);
+  }
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("ETag", object.httpEtag);
+  headers.set("Cache-Control", "private, max-age=3600");
+  headers.set("Access-Control-Allow-Origin", "*");
+  return new Response(object.body, { headers });
 });
 
-// Error handler
-app.onError((error, c) => {
-  console.error("MediaCloud Worker Error:", error);
-
-  return c.json({
-    success: false,
-    error: "Internal server error.",
-  }, 500);
-});
-
-// Frontend assets
-app.notFound((c) => {
-  return c.env.ASSETS.fetch(c.req.raw);
+app.delete("/api/file", async (c: Context<{ Bindings: Env }>) => {
+  const key = c.req.query("key");
+  if (!key || !validKey(key)) {
+    return c.json({ error: "Invalid file key" }, 400);
+  }
+  const existing = await c.env.R2.head(key);
+  if (!existing) {
+    return c.json({ error: "File not found" }, 404);
+  }
+  await c.env.R2.delete(key);
+  return c.json({ success: true, deleted: key });
 });
 
 export default app;
