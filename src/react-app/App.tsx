@@ -6,7 +6,6 @@ import Dashboard from "@uppy/react/dashboard";
 import "./App.css";
 
 const supabase = createClient(import.meta.env.VITE_SUPABASE_URL || "", import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || "");
-
 function App() {
   const [folder, setFolder] = useState("websites/blog");
   const [session, setSession] = useState<any>(null);
