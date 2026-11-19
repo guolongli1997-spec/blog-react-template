@@ -5,22 +5,14 @@
   "account_id": "61e201b941702855eb07a25528d7c059",
   "main": "./src/worker/index.ts",
   "compatibility_date": "2025-10-08",
-  "compatibility_flags": [
-    "nodejs_compat"
-  ],
-  "observability": {
-    "enabled": true
-  },
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
   "upload_source_maps": true,
   "assets": {
     "directory": "./dist/client",
-    "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },
   "r2_buckets": [
-    {
-      "binding": "R2",
-      "bucket_name": "jing24-shop"
-    }
+    { "binding": "R2", "bucket_name": "jing24-shop" }
   ]
 }
